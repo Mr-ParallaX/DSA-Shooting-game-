@@ -6,3 +6,6 @@ __pycache__/
 # VS Code & runner temp files
 .vscode/
 tempCodeRunnerFile.*
+
+# Pygbag build output
+build/
