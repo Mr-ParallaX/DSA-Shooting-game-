@@ -1,336 +1,351 @@
-import tkinter as tk
-from PIL import Image, ImageTk
+import pygame
 import random
+import asyncio
+import os
+import sys
 
 # Window settings
-WINDOW_WIDTH = 800
+WINDOW_WIDTH  = 800
 WINDOW_HEIGHT = 600
+FPS           = 30
 
-# Stack & Combo Constants
+# Stack / Combo constants (unchanged from original)
 STACK_LIMIT = 10
-COMBO_SIZE = 3
+COMBO_SIZE  = 3
 
-# Enemy types
+# Enemy types (unchanged)
 ENEMY_TYPES = ["Scizor", "Magneton", "Voltorb", "Gloom"]
 
-# Load image assets
+# Colours
+WHITE  = (255, 255, 255)
+BLACK  = (  0,   0,   0)
+GRAY   = (150, 150, 150)
+GRAY90 = (220, 220, 220)
+CYAN   = (  0, 255, 255)
+
+# Helper: load and scale image
 def load_image(path, size):
-    img = Image.open(path)
-    return ImageTk.PhotoImage(img.resize(size, Image.Resampling.LANCZOS))
+    """Load an image relative to the script directory, scale it."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    full = os.path.join(base, path)
+    img  = pygame.image.load(full).convert_alpha()
+    return pygame.transform.smoothscale(img, size)
 
 
-# Game class
+# Game States
+STATE_START    = "start"
+STATE_GAME     = "game"
+STATE_GAMEOVER = "gameover"
+
+
 class ShootingGame:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("DSA Combo Shooting Game")
-        self.canvas = tk.Canvas(root, width=WINDOW_WIDTH, height=WINDOW_HEIGHT)
-    # Draw vertical glass-like stack container on left side
-        self.canvas.pack()
 
-        # Background image if any
-        # self.bg = self.canvas.create_image(0, 0, anchor='nw', image=self.bg_img)
+    def __init__(self, screen):
+        self.screen = screen
+        self.clock  = pygame.time.Clock()
+        self.font_big   = pygame.font.SysFont("Arial", 18, bold=True)
+        self.font_small = pygame.font.SysFont("Arial", 12, bold=True)
+        self.font_med   = pygame.font.SysFont("Arial", 14, bold=True)
+        self.font_tiny  = pygame.font.SysFont("Arial",  9, bold=True)
 
-
-
-
-
-        # Load images
-        self.bg_img = load_image("background.png", (WINDOW_WIDTH, WINDOW_HEIGHT))
-        self.player_img = load_image("player.png", (60, 60))
-        self.bullet_img = load_image("bullet.png", (10, 20))
+        # Load shared assets
+        self.bg_img         = load_image("background.png",   (WINDOW_WIDTH, WINDOW_HEIGHT))
+        self.start_bg_img   = load_image("gamestart_bg.png", (500, 300))
+        self.gameover_bg    = load_image("gameover_bg.png",  (400, 220))
+        self.player_img     = load_image("player.png",  (60, 60))
+        self.bullet_img     = load_image("bullet.png",  (10, 20))
         self.enemy_imgs = {
-            "Scizor": load_image("enemy1.png", (40, 40)),
+            "Scizor":   load_image("enemy1.png", (40, 40)),
             "Magneton": load_image("enemy2.png", (40, 40)),
-            "Voltorb": load_image("enemy3.png", (40, 40)),
-            "Gloom": load_image("enemy4.png", (40, 40))
+            "Voltorb":  load_image("enemy3.png", (40, 40)),
+            "Gloom":    load_image("enemy4.png", (40, 40)),
         }
 
-        
+        # Timers (original: spawn every 2000ms, physics every 50ms)
+        self.SPAWN_DELAY  = 2000
+        self.FRAME_DELAY  = 50
 
-        # Draw background
-        self.canvas.create_image(0, 0, image=self.bg_img, anchor=tk.NW)
-        #vertical left stack border 
-        self.stack_border = self.canvas.create_rectangle(
-        10, 75, 50, 530,  # (x1, y1, x2, y2)
-        # outline="Scizor",
-        width=3,
-        outline="grey", fill="gray90"
+        self.state = STATE_START
+        self._reset_game()
 
-        
-        )
+    def _reset_game(self):
+        # Player position (original: WINDOW_WIDTH//2, WINDOW_HEIGHT-60)
+        self.player_x = WINDOW_WIDTH // 2
+        self.player_y = WINDOW_HEIGHT - 60
 
-        # self.stack_border = self.canvas.create_rectangle(
-        # 150, 30, 50, 80,  # (x1, y1, x2, y2)
-        # # outline="Scizor",
-        # width=3,
-        # outline="grey", fill="gray90"
+        self.bullets  = []   # each: [x, y]
+        self.enemies  = []   # each: [x, y, etype]
 
-        
-        # )
+        self.vertical_stack = []   # list of etype strings
+        self.combo_stack    = []   # list of etype strings
 
-
-        # Game variables
-        self.player = self.canvas.create_image(WINDOW_WIDTH//2, WINDOW_HEIGHT-60, image=self.player_img)
-        self.bullets = []
-        self.enemies = []
-        self.vertical_stack = []
-        self.combo_stack = []
-        self.score = 0
+        self.score     = 0
         self.game_over = False
 
+        self._last_update = pygame.time.get_ticks()
+        self._last_spawn  = pygame.time.get_ticks()
 
+    def update(self):
+        now = pygame.time.get_ticks()
 
-        # Stack display frame
-        self.stack_rects = []
-        self.combo_rects = []
+        if self.state == STATE_GAME:
+            # Physics at original 50ms rate
+            if now - self._last_update >= self.FRAME_DELAY:
+                self._last_update = now
+                self._physics_step()
 
-        # Bindings
-        self.root.bind("<Left>", self.move_left)
-        self.root.bind("<Right>", self.move_right)
-        self.root.bind("<space>", self.shoot)
+            # Spawn enemy every 2000ms (original: root.after(2000,...))
+            if now - self._last_spawn >= self.SPAWN_DELAY:
+                self._last_spawn = now
+                self._spawn_enemy()
 
-        # Start game
-        self.spawn_enemy()
-        self.update_game()
+    def _physics_step(self):
+        # Move bullets up 15px (original)
+        for b in self.bullets[:]:
+            b[1] -= 15
+            if b[1] < 0:
+                self.bullets.remove(b)
 
-    # Move player
-    def move_left(self, event):
-        if self.canvas.coords(self.player)[0] > 30:
-            self.canvas.move(self.player, -20, 0)
+        # Move enemies down 5px (original)
+        for e in self.enemies[:]:
+            e[1] += 5
+            ex, ey = e[0], e[1]
+            px, py = self.player_x, self.player_y
 
-    def move_right(self, event):
-        if self.canvas.coords(self.player)[0] < WINDOW_WIDTH - 30:
-            self.canvas.move(self.player, 20, 0)
-
-    def shoot(self, event):
-        x, y = self.canvas.coords(self.player)
-        bullet = self.canvas.create_image(x, y - 30, image=self.bullet_img)
-        self.bullets.append(bullet)
-
-    # Spawn enemies
-    def spawn_enemy(self):
-        if self.game_over:
-            return
-        enemy_type = random.choice(ENEMY_TYPES)
-        x = random.randint(50, WINDOW_WIDTH - 50)
-        enemy = self.canvas.create_image(x, 0, image=self.enemy_imgs[enemy_type])
-        self.enemies.append((enemy, enemy_type))
-        self.root.after(2000, self.spawn_enemy)
-
-    # Game loop
-    def update_game(self):
-        if self.game_over:
-            return
-
-        # Move bullets
-        for bullet in self.bullets[:]:
-            self.canvas.move(bullet, 0, -15)
-            if self.canvas.coords(bullet)[1] < 0:
-                self.canvas.delete(bullet)
-                self.bullets.remove(bullet)
-
-        # Move enemies
-        for enemy, etype in self.enemies[:]:
-            self.canvas.move(enemy, 0, 5)
-            ex, ey = self.canvas.coords(enemy)
-            px, py = self.canvas.coords(self.player)
-
-            # Collision with player
+            # Collision with player (original: 40px threshold)
             if abs(px - ex) < 40 and abs(py - ey) < 40:
-                self.end_game()
+                self.state = STATE_GAMEOVER
                 return
 
-            # Enemy reached bottom
+            # Enemy past bottom
             if ey > WINDOW_HEIGHT:
-                
-                self.canvas.delete(enemy)
-                self.enemies.remove((enemy, etype))
+                self.enemies.remove(e)
 
-        # Check bullet-enemy collision
-        for bullet in self.bullets[:]:
-            bx, by = self.canvas.coords(bullet)
-            for enemy, etype in self.enemies[:]:
-                ex, ey = self.canvas.coords(enemy)
+        # Bullet-enemy collision (original: 30px threshold)
+        for b in self.bullets[:]:
+            bx, by = b[0], b[1]
+            for e in self.enemies[:]:
+                ex, ey, etype = e[0], e[1], e[2]
                 if abs(bx - ex) < 30 and abs(by - ey) < 30:
-                    self.add_to_stack(etype)
-                    self.canvas.delete(bullet)
-                    self.bullets.remove(bullet)
-                    self.canvas.delete(enemy)
-                    self.enemies.remove((enemy, etype))
+                    self._add_to_stack(etype)
+                    if b in self.bullets:
+                        self.bullets.remove(b)
+                    if e in self.enemies:
+                        self.enemies.remove(e)
                     break
 
-        self.root.after(50, self.update_game)
+    def _spawn_enemy(self):
+        etype = random.choice(ENEMY_TYPES)
+        x     = random.randint(50, WINDOW_WIDTH - 50)
+        self.enemies.append([x, 0, etype])
 
-    # Stack logic
-    def add_to_stack(self, etype):
+    def _add_to_stack(self, etype):
+        """Stack/combo logic identical to original add_to_stack."""
         if len(self.vertical_stack) >= STACK_LIMIT:
-            self.end_game()
+            self.state = STATE_GAMEOVER
             return
 
         self.vertical_stack.append(etype)
-        self.update_stack_display()
 
-        # Check for combo
         if len(self.vertical_stack) >= COMBO_SIZE:
             last_three = self.vertical_stack[-3:]
             if last_three.count(last_three[0]) == 3:
                 self.vertical_stack = self.vertical_stack[:-3]
                 self.combo_stack.append(last_three[0])
                 self.score += 1
-                self.update_stack_display()
-                self.update_combo_display()
 
-    # Draw vertical stack
-    def update_stack_display(self):
-        for rect in self.stack_rects:
-            self.canvas.delete(rect)
-        self.stack_rects = []
+    def handle_event(self, event):
+        if self.state == STATE_START:
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                # Start button centred at (260,160) on 500x300 popup
+                ox = (WINDOW_WIDTH  - 500) // 2
+                oy = (WINDOW_HEIGHT - 300) // 2
+                bx = ox + 260 - 55
+                by = oy + 160 - 15
+                mx, my = event.pos
+                if bx <= mx <= bx + 110 and by <= my <= by + 30:
+                    self._last_spawn  = pygame.time.get_ticks()
+                    self._last_update = pygame.time.get_ticks()
+                    self._spawn_enemy()
+                    self.state = STATE_GAME
 
-        x = 30
-        y = 100
-        for etype in self.vertical_stack:
+        elif self.state == STATE_GAME:
+            if event.type == pygame.KEYDOWN:
+                # Left/right movement (original: 20px steps, boundary checks)
+                if event.key == pygame.K_LEFT:
+                    if self.player_x > 30:
+                        self.player_x -= 20
+                elif event.key == pygame.K_RIGHT:
+                    if self.player_x < WINDOW_WIDTH - 30:
+                        self.player_x += 20
+                elif event.key == pygame.K_SPACE:
+                    self.bullets.append([self.player_x, self.player_y - 30])
+
+        elif self.state == STATE_GAMEOVER:
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                # Restart button on game-over popup (400x220, centred)
+                ox = (WINDOW_WIDTH  - 400) // 2
+                oy = (WINDOW_HEIGHT - 220) // 2
+                bx = ox + 200 - 55
+                by = oy + 170 - 15
+                mx, my = event.pos
+                if bx <= mx <= bx + 110 and by <= my <= by + 30:
+                    self._reset_game()
+                    self._spawn_enemy()
+                    self.state = STATE_GAME
+
+    def draw(self):
+        if self.state == STATE_START:
+            self._draw_start()
+        elif self.state == STATE_GAME:
+            self._draw_game()
+        elif self.state == STATE_GAMEOVER:
+            self._draw_gameover()
+
+    def _draw_start(self):
+        """Start screen - mirrors original show_start_window."""
+        self.screen.fill(BLACK)
+        ox = (WINDOW_WIDTH  - 500) // 2
+        oy = (WINDOW_HEIGHT - 300) // 2
+        self.screen.blit(self.start_bg_img, (ox, oy))
+
+        # Welcome text (original: 250,110 relative to popup)
+        txt = self.font_big.render("Welcome to the DSA Shooting Game!", True, WHITE)
+        self.screen.blit(txt, (ox + 250 - txt.get_width() // 2,
+                               oy + 110 - txt.get_height() // 2))
+
+        # Start Game button (original: 260,160 relative to popup)
+        bx = ox + 260 - 55
+        by = oy + 160 - 15
+        pygame.draw.rect(self.screen, GRAY90, (bx, by, 110, 30), border_radius=5)
+        pygame.draw.rect(self.screen, GRAY,   (bx, by, 110, 30), 2, border_radius=5)
+        btn_txt = self.font_med.render("Start Game", True, BLACK)
+        self.screen.blit(btn_txt, (bx + 55 - btn_txt.get_width()  // 2,
+                                   by + 15 - btn_txt.get_height() // 2))
+
+        # Controls hint
+        hint = self.font_small.render("Arrow Keys: Move   |   SPACE: Shoot", True, GRAY90)
+        self.screen.blit(hint, (ox + 250 - hint.get_width() // 2, oy + 210))
+
+    def _draw_game(self):
+        """Main game screen."""
+        self.screen.blit(self.bg_img, (0, 0))
+
+        # Left vertical stack border (original rect: 10,75 -> 50,530)
+        pygame.draw.rect(self.screen, GRAY90, (10, 75, 40, 455))
+        pygame.draw.rect(self.screen, GRAY,   (10, 75, 40, 455), 3)
+
+        # Vertical stack (original: x=30, y starts 100, step 45)
+        for i, etype in enumerate(self.vertical_stack):
             img = self.enemy_imgs[etype]
-            rect = self.canvas.create_image(x, y, image=img)
-            self.stack_rects.append(rect)
-            y += 45
-    #draw vertical combo  stack 
-    def update_combo_display(self):
-    # Delete previous combo stack images
-        for rect in self.combo_rects:
-            self.canvas.delete(rect)
-        self.combo_rects = []
+            self.screen.blit(img, (30 - 20, 100 + i * 45 - 20))
 
-    # Delete previous combo text if exists
-        if hasattr(self, 'combo_text_id'):
-            self.canvas.delete(self.combo_text_id)
-
-        # Position for combo stack on right side
-        x = WINDOW_WIDTH - 50  # X-coordinate on the right
-        y = 100  # Start Y
-
-        # Draw each element in the combo stack
-        for etype in self.combo_stack:
-            img = self.enemy_imgs[etype]
-            rect = self.canvas.create_image(x, y, image=img)
-            self.combo_rects.append(rect)
-            y += 45  # Go down for next
-
-    # Draw a border rectangle around combo stack (optional)
+        # Combo stack (original: x=WINDOW_WIDTH-50, y starts 100, step 45)
+        cx = WINDOW_WIDTH - 50
         if self.combo_stack:
-            self.canvas.create_rectangle(
-                x - 25, 78,
-                x + 25, 70 + len(self.combo_stack) * 45,
-                outline="white", width=2
-            )
+            ch = 70 + len(self.combo_stack) * 45 - 78
+            pygame.draw.rect(self.screen, WHITE, (cx - 25, 78, 50, ch), 2)
 
-    # Draw the "Combo Points" text above the combo stack
-        self.combo_text_id = self.canvas.create_text(
-            x, 70,  # position above the combo stack
-            text=f"Combo Points: {len(self.combo_stack)}",
-            fill="white",
-            font=("Arial", 8, "bold")
-        )
+        # "Combo Points: N" label (original: at cx, 70)
+        cp_txt = self.font_tiny.render("Combo Points: " + str(len(self.combo_stack)), True, WHITE)
+        self.screen.blit(cp_txt, (cx - cp_txt.get_width() // 2,
+                                  70 - cp_txt.get_height() // 2))
 
+        for i, etype in enumerate(self.combo_stack):
+            img = self.enemy_imgs[etype]
+            self.screen.blit(img, (cx - 20, 100 + i * 45 - 20))
 
+        # Bullets
+        for b in self.bullets:
+            self.screen.blit(self.bullet_img, (b[0] - 5, b[1] - 10))
 
+        # Enemies
+        for e in self.enemies:
+            img = self.enemy_imgs[e[2]]
+            self.screen.blit(img, (e[0] - 20, e[1] - 20))
 
+        # Player
+        self.screen.blit(self.player_img, (self.player_x - 30, self.player_y - 30))
 
+        # Score
+        score_txt = self.font_med.render("Score: " + str(self.score), True, WHITE)
+        self.screen.blit(score_txt, (WINDOW_WIDTH // 2 - score_txt.get_width() // 2, 10))
 
+    def _draw_gameover(self):
+        """Game-over screen - mirrors original end_game popup."""
+        self.screen.blit(self.bg_img, (0, 0))
 
+        # Dim overlay
+        dim = pygame.Surface((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 160))
+        self.screen.blit(dim, (0, 0))
 
-        
+        # gameover_bg.png popup (400x220, centred)
+        ox = (WINDOW_WIDTH  - 400) // 2
+        oy = (WINDOW_HEIGHT - 220) // 2
+        self.screen.blit(self.gameover_bg, (ox, oy))
 
+        # "Game Over! Score: N" (original font Arial 14)
+        go_txt = self.font_big.render("Game Over!  Score: " + str(self.score), True, WHITE)
+        self.screen.blit(go_txt, (ox + 200 - go_txt.get_width() // 2,
+                                  oy + 35 - go_txt.get_height() // 2))
 
-    # End game
-    def end_game(self):
-        self.game_over = True
-        popup = tk.Toplevel()
-        popup.title("Game Over")
-        popup.minsize(300,150)
-        popup.maxsize(500,150)
-        popup.wm_iconbitmap("22.ico")
-        # Load and place background image
-        bg_image = ImageTk.PhotoImage(Image.open("gameover_bg.png").resize((300, 150)))
-        bg_label = tk.Label(popup, image=bg_image)
-        bg_label.image = bg_image  # Keep a reference!
-        bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+        # Combo stack string (original: ', '.join(...) or "No combo collected")
+        combo_string = ", ".join(self.combo_stack) if self.combo_stack else "No combo collected"
+        if len(combo_string) > 32:
+            combo_string = combo_string[:32] + "..."
+        cs_txt = self.font_small.render("Combo Stack: [" + combo_string + "]", True, CYAN)
+        self.screen.blit(cs_txt, (ox + 200 - cs_txt.get_width() // 2,
+                                  oy + 85 - cs_txt.get_height() // 2))
 
+        # Total combos
+        cc_txt = self.font_small.render("Total Combos: " + str(len(self.combo_stack)), True, WHITE)
+        self.screen.blit(cc_txt, (ox + 200 - cc_txt.get_width() // 2,
+                                  oy + 115 - cc_txt.get_height() // 2))
 
-        # self.bg_img = load_image("gameover_bn.png", (WINDOW_WIDTH, WINDOW_HEIGHT))
-        tk.Label(popup, text=f"Game Over! Score: {self.score}", font=("Arial", 14)).pack(pady=20)
-        tk.Button(popup, text="Restart", command=self.restart_game).pack()
-
-        # Show combo stack
-        combo_string = ', '.join(self.combo_stack) if self.combo_stack else "No combo collected"
-        tk.Label(popup, text=f"Combo Stack: [{combo_string}]", font=("Arial", 10), bg="black", fg="cyan").pack(pady=10)
-        # tk.Label(popup, text=f"Combo Stack: [{len(self.combo_stack)}]", font=("Arial", 10), bg="black", fg="cyan").pack(pady=10)
-
-
-
-
-
-    # Restart logic
-    def restart_game(self):
-        self.root.destroy()
-        main()  # restart the game
-
-
-# Launch game
-def main():
-    root = tk.Tk()
-    # to change the icon of the tkinter 
-    root.wm_iconbitmap("22.ico")
-    root.minsize(800,600)
-    root.maxsize(800,600)
-    game = ShootingGame(root)
-    root.mainloop()
-
-      # game starting window
-def show_start_window():
-    # Load images
-    
-
-    start_window = tk.Tk()
-    start_window.title("Welcome to the Game")
-    start_window.minsize(500,300)
-    start_window.maxsize(500,300)
-    # start_window.geometry("500x300")
-    start_window.wm_iconbitmap("22.ico")
-
-    # Load background image and resize to match window size
-    bg_image = Image.open("gamestart_bg.png").resize((500, 300))
-    bg_photo = ImageTk.PhotoImage(bg_image)
-
-    # Keep a reference to prevent garbage collection
-    start_window.bg_photo = bg_photo
-
-    # Create canvas and add image
-    canvas = tk.Canvas(start_window, width=500, height=300)
-    canvas.pack()
-    canvas.create_image(0, 0, anchor="nw", image=bg_photo)
-
-    # Add welcome text ON the image
-    canvas.create_text(250, 110, text="Welcome to the DSA Shooting Game!", font=("Arial", 14, "bold"), fill="white")
-
-    # Add Start button ON the image
-    start_button = tk.Button(start_window, text="Start Game", font=("Arial", 10), command=lambda: start_game(start_window))
-    canvas.create_window(260, 160, window=start_button)
-
-    start_window.mainloop()
-def start_game(start_window):
-    start_window.destroy()  # Close the start window
-    main()  # Launch your main game logic
+        # Restart button
+        bx = ox + 200 - 55
+        by = oy + 170 - 15
+        pygame.draw.rect(self.screen, GRAY90, (bx, by, 110, 30), border_radius=5)
+        pygame.draw.rect(self.screen, GRAY,   (bx, by, 110, 30), 2, border_radius=5)
+        rb_txt = self.font_med.render("Restart", True, BLACK)
+        self.screen.blit(rb_txt, (bx + 55 - rb_txt.get_width()  // 2,
+                                  by + 15 - rb_txt.get_height() // 2))
 
 
+# Async entry point (required by Pygbag)
+async def main():
+    pygame.init()
+    pygame.display.set_caption("DSA Combo Shooting Game")
+    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
 
-        # Entry point of your program
+    # Set window icon (skip gracefully if unsupported in browser)
+    try:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "22.ico")
+        icon = pygame.image.load(icon_path)
+        pygame.display.set_icon(icon)
+    except Exception:
+        pass
+
+    game  = ShootingGame(screen)
+    clock = pygame.time.Clock()
+
+    while True:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            game.handle_event(event)
+
+        game.update()
+        game.draw()
+        pygame.display.flip()
+
+        # Yield to browser event loop (REQUIRED for Pygbag)
+        await asyncio.sleep(0)
+
+        clock.tick(FPS)
+
+
 if __name__ == "__main__":
-    show_start_window()  #  Launch the start window FIRST
-
-
-
-
-
-
-
+    asyncio.run(main())
